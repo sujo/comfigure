@@ -1,0 +1,460 @@
+#!/usr/bin/perl -w
+# (You may have to adjust the path to the perl executable in the first line.)
+
+# comfigure makes the task of configuring many packages comfortable. It
+# remembers the configure options for each package and uses them automatically
+# if called without options.
+#
+# Run "comfigure help" for a complete list of commands.
+
+
+#    Copyright (C) 2002-2013 Jochen Suckfuell
+#
+#    This program is free software; you can redistribute it and/or modify
+#    it under the terms of the GNU General Public License as published by
+#    the Free Software Foundation; either version 2 of the License, or
+#    (at your option) any later version.
+#
+#    This program is distributed in the hope that it will be useful,
+#    but WITHOUT ANY WARRANTY; without even the implied warranty of
+#    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+#    GNU General Public License for more details.
+#
+#    You should have received a copy of the GNU General Public License
+#    along with this program; if not, write to the Free Software
+#    Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
+#
+
+# Prerequisites:
+#
+# You should have the Digest::MD5 Perl package installed. It is used to
+# determine if the configuration options have changed from the stored version
+# to the current version.
+#
+
+#-------- configuration section -------------------------------------
+
+my $comfigs_file = "$ENV{HOME}/.comfigs";
+
+#-------- no configuration below ------------------------------------
+
+my $myversion = "1.3";
+
+#--------------------------------------------------------------------
+
+use strict;
+
+use Digest::MD5;
+
+my $USAGE = <<END_USAGE;
+comfigure $myversion Copyright 2002-2013 Jochen Suckfuell, License: GNU GPL
+Usage: comfigure [command(s)] <configure options>
+
+If no command is given, supplied configure options will be stored. If no
+command and no configure options are given, the last used options will be used
+if possible.
+
+Commands are:
+   interactive  ask each time before using stored options.
+                (this is the default if the version has changed)
+   new          force new entry, even if no options are given
+   use_old      use old options without asking even if the stored version is
+                older and there are new configure options (only applies if no
+                configure options are given)
+   add          add more options to the stored options
+   show         show configuration for the current directory or for all named
+                programs and exit
+   showall      show all known programs with version and date of configuration
+                and exit
+   forget       forget configuration for the current directory or for all named
+                programs and exit. Everything after the 'forget' command will
+                be interpreted as a program name (even 'interactive', so be
+                careful!).
+   exec         take the following argument as executable instead of
+                './configure'
+   help         display this help and exit
+   --help       invokes './configure --help' and exits
+END_USAGE
+
+# options
+my $force_new = 0;
+my $interactive = 0;
+my $add_option = 0;
+my $batch = 0;
+my $use_old = 0;
+my $show = 0;
+my $showall = 0;
+my $forget = 0;
+my $configure = "./configure";
+my $help = 0;
+
+my %comfigs;
+
+# check for commands
+while(@ARGV && $ARGV[0]!~/^-/)
+{
+	my $cmd = shift @ARGV;
+	if($cmd eq "new") { $force_new = 1; }
+	elsif($cmd eq "interactive") { $interactive = 1; $batch = 0; }
+	elsif($cmd eq "batch") { $batch = 1; $interactive = 0; }
+	elsif($cmd eq "use_old") { $use_old = 1; }
+	elsif($cmd eq "add") { $add_option = 1; }
+	elsif($cmd eq "show") { $show= 1; last; }
+	elsif($cmd eq "showall") { $showall = 1; last; }
+	elsif($cmd eq "show_all") { $showall = 1; last; }
+	elsif($cmd eq "forget") { $forget = 1; last; }
+	elsif($cmd eq "exec")
+	{
+		die "No argument given to 'exec' command" unless scalar @ARGV;
+		$configure = shift @ARGV;
+	}
+	elsif($cmd eq "help") { $help = 1; last; }
+	else
+	{
+		die "unknown command: $cmd\n\n$USAGE";
+		last;
+	}
+}
+
+if($help)
+{
+	print $USAGE;
+	exit 0;
+}
+
+my $optstring = join " ", @ARGV;
+
+if($optstring =~ /--help\b/)
+{
+	print "+ configure --help requested; nothing stored.\n";
+	exec "$configure $optstring" or exit 3;
+}
+
+read_comfigs();
+
+if($show)
+{
+	if(@ARGV)
+	{
+		foreach my $prog (@ARGV)
+		{
+			print "'$prog' ";
+			if(my $ref = $comfigs{$prog})
+			{
+				print "version ".$ref->{version}.", from ".localtime($ref->{date})."\nOptions: '".$ref->{options}."'\n";
+			}
+			else
+			{
+				print "not known\n";
+			}
+		}
+	}
+	else
+	{
+		my $current = where_are_we();
+		if(my $ref = $comfigs{$current->{program}})
+		{
+			print "'".$ref->{program}."' version ".$ref->{version}.", from ".localtime($ref->{date})."\nOptions: '".$ref->{options}."'\n";
+		}
+		else
+		{
+			print "No configuration found for '".$current->{program}.".\n";
+			exit 1;
+		}
+	}
+
+	exit 0;
+}
+
+if($showall)
+{
+	foreach my $prog (keys %comfigs)
+	{
+		print "'$prog' version ".$comfigs{$prog}->{version}.", from ".localtime($comfigs{$prog}->{date})."\n";
+	}
+	exit 0;
+}
+
+if($forget)
+{
+	if(@ARGV)
+	{
+		foreach my $prog (@ARGV)
+		{
+			if(my $ref = $comfigs{$prog})
+			{
+				if($interactive)
+				{
+					print "'", $ref->{program}, "' version ", $ref->{version}, " . Delete? (y/N) ";
+					my $agreed = <STDIN>;
+					if($agreed !~ /^y/i)
+					{
+						print "+ Skipped.\n";
+						next;
+					}
+				}
+				print "+ '".$ref->{program}."' version ".$ref->{version}." options deleted.\n";
+				delete $comfigs{$prog};
+			}
+			else
+			{
+				print "'$prog' not known\n";
+			}
+		}
+	}
+	else
+	{
+		my $current = where_are_we();
+		if(my $ref = $comfigs{$current->{program}})
+		{
+			if($interactive)
+			{
+				print "'", $ref->{program}, "' version ", $ref->{version}, " . Delete? (y/N) ";
+				my $agreed = <STDIN>;
+				if($agreed !~ /^y/i)
+				{
+					print "Nothing done.\n";
+					exit 0;
+				}
+			}
+			print "+ '".$ref->{program}."' version ".$ref->{version}." options deleted.\n";
+			delete $comfigs{$current->{program}};
+		}
+		else
+		{
+			print "No configuration found for '".$current->{program}.".\n";
+			exit 1;
+		}
+	}
+	write_comfigs();
+	exit 0;
+}
+
+my $current = where_are_we();
+
+if($optstring || $force_new)
+{
+	if($add_option)
+	{
+		if($comfigs{$current->{program}})
+		{
+			print "+ Adding options '$optstring'\n";
+			$optstring = $comfigs{$current->{program}}->{options} ." ".$optstring;
+		}
+	}
+	
+	if($interactive)
+	{
+		if($comfigs{$current->{program}})
+		{
+			if($add_option)
+			{
+				print "+ New options are '$optstring'.\n";
+			}
+			print "The last configuration was: '".$comfigs{$current->{program}}->{options}."'.\nReplace it? (Y/n) ";
+			my $agreed = <STDIN>;
+			if($agreed =~ /^n/i)
+			{
+				print "Nothing done.\n";
+				exit 0;
+			}
+		}
+		else
+		{
+			print "Run '$configure' for '", $current->{program}, "' version ", $current->{version}, " with options '", $optstring, "'? (Y/n) ";
+			my $agreed = <STDIN>;
+			if($agreed =~ /^n/i)
+			{
+				print "Nothing done.\n";
+				exit 0;
+			}
+		}
+	}
+
+	my $md5 = Digest::MD5->new;
+	open (CONF, "$configure --help 2>&1 |") or die "Execution of '$configure --help' failed: $!";
+	$md5->addfile(*CONF);
+	close CONF;
+	$current->{optsdigest} = $md5->hexdigest;
+	$current->{options} = $optstring;
+	$current->{date} = time;
+	$comfigs{$current->{program}} = $current;
+	
+}
+else
+{
+	# check for known configuration
+	my $stored = $comfigs{$current->{program}};
+	if(! $stored)
+	{
+		print "+ There's no configuration for '".$current->{program}."' stored yet.\nUse the 'new' command to force learning an empty options string.\nNothing done.\n";
+		exit 1;
+	}
+
+	if($current->{version} !~ /^$stored->{version}$/)
+	{
+		print "+ Stored version is ".$stored->{version}." from ".localtime($stored->{date}).".\n";
+		my $md5 = Digest::MD5->new;
+		open (CONF, "$configure --help 2>&1 |") or die "Execution of '$configure --help' failed: $!";
+		$md5->addfile(*CONF);
+		close CONF;
+		my $digest = $md5->hexdigest;
+		if(($digest !~ /^$stored->{optsdigest}$/))
+		{
+			print "The available options have changed.\nStored options: '".$stored->{options}."'\nUse anyway? (y/N) ";
+			if($use_old)
+			{
+				print "yes (use_old)\n";
+			}
+			else
+			{
+				if($batch)
+				{
+					print "no (batch)\nNothing done.\n";
+					exit 4;
+				}
+				else
+				{
+					my $agreed = <STDIN>;
+					if($agreed !~ /^y/i)
+					{
+						print "Nothing done.\n";
+						exit 0;
+					}
+				}
+			} # use_old
+			
+			$stored->{optsdigest} = $digest;
+			
+		} # new configure options
+		else
+		{
+			print "+ The available configuration options are the same.\n";
+			if($interactive)
+			{
+				print "Stored options: '".$stored->{optstring}."'.\nRun configure now? (Y/n) ";
+				my $agreed = <STDIN>;
+				if($agreed =~ /^n/)
+				{
+					print "Nothing done.\n";
+					exit 0;
+				}
+			}
+		}
+		
+		$stored->{version} = $current->{version};
+		
+	} # version difference
+	else
+	{
+		print "+ Stored version is the same.\n";
+		if($interactive)
+		{
+			print "Stored options: '".$stored->{optstring}."'.\nRun configure now? (Y/n) ";
+			my $agreed = <STDIN>;
+			if($agreed =~ /^n/)
+			{
+				print "Nothing done.\n";
+				exit 0;
+			}
+		}
+	}
+	
+	$stored->{date} = time;
+	$optstring = $comfigs{$current->{program}}->{options};
+}
+
+write_comfigs();
+
+print "+ Running: '$configure $optstring'\n";
+exec "$configure $optstring" or exit(4);
+
+1;
+
+sub where_are_we
+{
+	my $pwd = $ENV{PWD};
+	($pwd =~ m#/([^/]+)$#) || die "Cannot parse directory: '$pwd'";
+	
+	my $dirname = $1;
+	my $prog;
+	my $ver;
+	if($dirname =~ m/^([^0-9]+?)[-_.]*(\d.+)$/)
+	{
+		$prog = $1;
+		$ver = $2;
+	}
+	else
+	{
+		print "Can't parse program and version from current directory '$dirname'\n";
+		if($batch)
+		{
+			print "+ (batch mode) Leaving.\n";
+			exit 2;
+		}
+PROGNAME:
+		print "Please tell me the program name: [$dirname] ";
+		$prog = <STDIN>;
+		chomp $prog;
+		if(! $prog) { $prog = $dirname; }
+		
+		print "and now the version: ";
+		$ver = <STDIN>;
+		chomp $ver;
+	}
+	if($interactive)
+	{
+		print "Program name: '", $prog, "', version: ", $ver, "\nIs this correct? (Y/n) ";
+		my $agreed = <STDIN>;
+		if($agreed =~ /^n/i)
+		{
+			goto PROGNAME;
+		}
+	}
+	print "+ Configuring '$prog', version $ver\n";
+	
+	return { 'dirname' => "$dirname", 'program' => "$prog", 'version' => "$ver" };
+}		
+
+sub read_comfigs
+{
+	if(! open COMF, "< $comfigs_file")
+	{
+		%comfigs = ();
+		return;
+	}
+
+	for(;;)
+	{
+		my $prog = <COMF>;
+		if(eof(COMF)) { last; }
+
+		chomp $prog;
+		my $ver = <COMF>; chomp $ver;
+		my $dirname = <COMF>; chomp $dirname;
+		my $opts = <COMF>; chomp $opts;
+		my $date = <COMF>; chomp $date;
+		my $optsdigest = <COMF>; chomp $optsdigest;
+		$comfigs{$prog} = { 'program' => "$prog", 'dirname' => "$dirname", 'version' => "$ver", 'options' => "$opts", 'date' => $date, 'optsdigest' => "$optsdigest" };
+	}
+
+	close COMF;
+}
+		
+sub write_comfigs
+{
+	open COMF, "> $comfigs_file" or die "Cannot write '$comfigs_file': $!";
+	foreach my $prog (keys %comfigs)
+	{
+		print COMF $prog."\n";
+		print COMF $comfigs{$prog}->{version}."\n";
+		print COMF $comfigs{$prog}->{dirname}."\n";
+		print COMF $comfigs{$prog}->{options}."\n";
+		print COMF $comfigs{$prog}->{date}."\n";
+		print COMF $comfigs{$prog}->{optsdigest}."\n";
+	}
+	close COMF;
+	print "+ Configuration stored.\n";
+}
+
+
