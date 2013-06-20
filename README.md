@@ -5,6 +5,7 @@ A comfortable way to manage ./configure options.
 
 Usage
 ----------
+'''
 $ ./comfigure help
 comfigure 1.3 Copyright 2002 Jochen Suckfuell, License: GNU GPL
 Usage: comfigure [command(s)] <configure options>
@@ -33,6 +34,7 @@ Commands are:
                 './configure'
    help         display this help and exit
    --help       invokes './configure --help' and exits
+'''
 
 
 Sources
